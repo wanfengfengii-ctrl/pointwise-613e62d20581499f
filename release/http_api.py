@@ -108,15 +108,21 @@ class ReleaseHandler(JsonHandler):
             if existing.receipt.program_id != program_id:
                 raise ApiError(409, 'request_conflict')
             return receipt_payload(existing.receipt)
-        proof = Proof.from_payload(plan['proof'])
-        grants = {row['recording_id']: Grant.from_row(row) for row in plan['grants']}
+        proof, grants = self.release_plan(plan)
         hooks = self.context.hooks
-        receipt, created = publish_program(store, request_id, proof, grants,
-                                           after_registration=hooks.after_registration,
-                                           after_selection=hooks.after_selection)
+        receipt, created = publish_program(
+            store, request_id, proof, grants,
+            after_registration=hooks.after_registration,
+            after_selection=hooks.after_selection,
+            refresh=lambda: self.release_plan(self.editorial_get(f'/internal/release-plan/{program_id}')))
         if created and hooks.drop_after_commit is not None and hooks.drop_after_commit(receipt):
             raise DropResponse()
         return receipt_payload(receipt)
+
+    @staticmethod
+    def release_plan(plan):
+        grants = {row['recording_id']: Grant.from_row(row) for row in plan['grants']}
+        return Proof.from_payload(plan['proof']), grants
 
 
 def serve_release(database, editorial_url, desk_key, *, port=0, hooks=None):

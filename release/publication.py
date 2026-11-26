@@ -92,29 +92,35 @@ def _choose(db, proof, grants):
     return None
 
 
-def _decide(store, request_id, proof, grants, after_selection):
+def _decide(store, request_id, proof, grants, after_selection, refresh):
     public_id = f'preview-{proof.program_id}'
     with transaction(store.db, immediate=False):
         previous = store.get_by_request(request_id)
-        if previous is None and store.get_publication(public_id) is not None:
+        if previous is not None:
+            # An established request always yields its original first-run result.
+            return previous.receipt, False
+        if store.get_publication(public_id) is not None:
             raise ApiError(409, 'program_already_published')
         choice = _choose(store.db, proof, grants)
         if after_selection is not None:
             selected_id = None if choice is None else choice[0].entry.candidate.recording_id
             after_selection(selected_id)
+        if refresh is not None:
+            # Consent may have been withdrawn while this first publication was being arranged.
+            proof, grants = refresh()
+            public_id = f'preview-{proof.program_id}'
+            choice = _choose(store.db, proof, grants)
         if choice is None:
-            if previous is not None:
-                return previous.receipt, False
             store.set_status(request_id, 'no_eligible_source')
             return None, False
         reference, grant = choice
         receipt = make_receipt(request_id, public_id, reference, grant)
         store.establish(Publication(receipt, reference.clip.audio))
-        return receipt, previous is None
+        return receipt, True
 
 
 def publish_program(store: PublicationStore, request_id, proof: Proof, grants, *,
-                    after_registration=None, after_selection=None):
+                    after_registration=None, after_selection=None, refresh=None):
     with transaction(store.db):
         store.register(request_id, proof.program_id)
         established = store.get_by_request(request_id) is not None
@@ -124,7 +130,7 @@ def publish_program(store: PublicationStore, request_id, proof: Proof, grants, *
         try:
             # A WAL read snapshot can only be promoted if another writer has not superseded it.
             observer = after_selection if attempt == 0 else None
-            receipt, created = _decide(store, request_id, proof, grants, observer)
+            receipt, created = _decide(store, request_id, proof, grants, observer, refresh)
         except sqlite3.OperationalError as error:
             if not database_busy(error):
                 raise
